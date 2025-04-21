@@ -1,4 +1,4 @@
-module sprok
+module github.com/z-campbell/sprok
 
 go 1.24
 
