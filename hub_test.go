@@ -63,7 +63,11 @@ func TestSubscribe(t *testing.T) {
 	if len(subs) != 2 {
 		t.Errorf("Subscribe should have two subscribers")
 	}
-
+	sub3 := NewSubscriber[Message]("1", 1)
+	err = hub.Subscribe(&sub3)
+	if err != nil {
+		t.Errorf("Subscribe error: %s", err)
+	}
 	err = hub.Unsubscribe(sub1)
 
 	if err != nil {
@@ -71,7 +75,7 @@ func TestSubscribe(t *testing.T) {
 	}
 
 	subs = hub.GetSubscribers()
-	if len(subs) != 1 {
+	if len(subs) != 2 {
 		t.Errorf("Subscribe should have one subscriber after unsubscribe")
 	}
 	cancel()
@@ -79,7 +83,7 @@ func TestSubscribe(t *testing.T) {
 
 func TestBufferedChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	channel := CreateBufferedChannel[Message]()
+	channel := CreateBufferedChannel[Message](ctx, 1, 10)
 	err := channel.Start(ctx)
 	if err != nil {
 		t.Errorf("Start error: %s", err)
@@ -92,11 +96,6 @@ func TestBufferedChannel(t *testing.T) {
 	}
 
 	channel.mu.Unlock()
-	_, ex := channel.TryReadChannel(time.Millisecond * 0)
-	// Should throw error for timeout.
-	if ex == nil {
-		t.Errorf("TryReadChannel should return error when timeout is 0 and no data is available")
-	}
 
 	for i := range 15 {
 		channel.Add(*NewMessage(Ping, "test", "test", fmt.Sprintf("data%d", i)))
@@ -122,6 +121,42 @@ func TestBufferedChannel(t *testing.T) {
 		t.Errorf("channel should have 10 and buffer should have 4")
 	}
 	channel.mu.Unlock()
+
+	cancel()
+}
+
+func TestReadTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	channel := CreateBufferedChannel[Message](ctx, 1, 10)
+	err := channel.Start(ctx)
+	if err != nil {
+		t.Errorf("Start error: %s", err)
+	}
+	_, err = channel.TryReadChannel(time.Millisecond * 0)
+	if err == nil {
+		t.Errorf("TryReadChannel should return error when timeout is 0 and no data is available")
+	}
+	cancel()
+}
+
+func TestClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	hub := NewEventHub[Message](ctx)
+	client := NewClient[Message](hub, ctx)
+	defer client.Close()
+
+	if len(client.GetSubscriptions()) != 0 {
+		t.Errorf("Client should have 0 subscriptions")
+	}
+
+	err := client.Subscribe("124")
+	if err != nil {
+		t.Errorf("Subscribe error: %s", err)
+	}
+
+	if len(client.GetSubscriptions()) == 0 {
+		t.Errorf("Client should have one subscription")
+	}
 
 	cancel()
 }

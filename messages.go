@@ -9,11 +9,13 @@ type MessageType int
 
 const (
 	Unknown MessageType = iota
+	Event
 	Request
-	Tick
 	Response
+	Tick
 	Ping
 	Pong
+	ERROR
 )
 
 type MessageFilter func(Message) bool
@@ -36,11 +38,6 @@ type Message struct {
 	Data        interface{}
 }
 
-type ErrorMessage struct {
-	Message
-	Error error
-}
-
 func NewMessage(t MessageType, source string, dest string, data interface{}) *Message {
 	return &Message{
 		Id:          uuid.New(),
@@ -50,6 +47,15 @@ func NewMessage(t MessageType, source string, dest string, data interface{}) *Me
 		Destination: dest,
 		Data:        data,
 	}
+}
+
+type ErrorMessage struct {
+	Message
+	Error error
+}
+
+func NewErrorMessage(err error, source string) *Message {
+	return NewMessage(ERROR, source, "HUB", err)
 }
 
 func (e Message) GetType() MessageType    { return e.Type }

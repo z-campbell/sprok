@@ -32,7 +32,8 @@ func (b *BufferedChannel[T]) Start(ctx context.Context) error {
 	if b.running {
 		return errors.New("channel is already running")
 	}
-	go b.runChanHandler(ctx)
+	b.running = true
+	go b.runWorker(ctx)
 	return nil
 }
 
@@ -47,18 +48,26 @@ func (b *BufferedChannel[T]) Stop() error {
 	return nil
 }
 
-func CreateBufferedChannel[T any]() *BufferedChannel[T] {
+func CreateBufferedChannel[T any](ctx context.Context, workerCount int, bufferSize int) *BufferedChannel[T] {
 	b := &BufferedChannel[T]{
-		Ch:     make(chan T, DefaultChannelBufferSize),
+		Ch:     make(chan T, bufferSize),
 		Buffer: &[]T{},
 	}
 	b.cond = sync.NewCond(&b.mu)
+	b.launchWorkers(ctx, workerCount)
 	return b
+}
+
+func (b *BufferedChannel[T]) launchWorkers(ctx context.Context, numWorkers int) {
+	for range numWorkers {
+		go b.runWorker(ctx)
+	}
 }
 
 func (b *BufferedChannel[T]) Add(t T) {
 	select {
 	case b.Ch <- t:
+		b.cond.Broadcast()
 	default:
 		b.mu.Lock()
 		*b.Buffer = append(*b.Buffer, t)
@@ -73,18 +82,22 @@ func (b *BufferedChannel[T]) TryReadChannel(timeout time.Duration) (*T, error) {
 	case val = <-b.Ch:
 		return &val, nil
 	case <-time.After(timeout):
-		return &val, fmt.Errorf("timeout")
+		return nil, fmt.Errorf("timeout")
 	}
 }
 
-func (b *BufferedChannel[T]) runChanHandler(ctx context.Context) {
+func (b *BufferedChannel[T]) runWorker(ctx context.Context) {
 	for {
 		b.mu.Lock()
-		if len(*b.Buffer) == 0 {
-			b.mu.Unlock()
-			time.Sleep(DefaultDelayInterval) // avoid tight spinning
-			continue
+		// add the check for the cond.
+		for len(*b.Buffer) == 0 {
+			if ctx.Err() != nil {
+				b.mu.Unlock()
+				return
+			}
+			b.cond.Wait()
 		}
+
 		val := (*b.Buffer)[0]
 		*b.Buffer = (*b.Buffer)[1:]
 		b.mu.Unlock()

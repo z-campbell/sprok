@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"strconv"
 	"sync"
+)
+
+const (
+	DefaultHubBufferSize    = 100_000
+	DefaulErrorBufferSize   = 1000
+	DefaultHubWorkerCount   = 10
+	DefaultErrorWorkerCount = 10
 )
 
 type MessageHub[T MessageBase] interface {
@@ -15,12 +20,13 @@ type MessageHub[T MessageBase] interface {
 }
 
 type Hub[T MessageBase] struct {
-	Hub         BufferedChannel[T]
-	Ctx         context.Context
+	Hub         *BufferedChannel[T]
+	ctx         context.Context
+	cancel      context.CancelFunc
 	mut         sync.Mutex
 	Subscribers []*Subscriber[T]
 	Topics      map[string][]*Subscriber[T] // "TopicName" : []Subscriber
-	Errors      BufferedChannel[ErrorMessage]
+	Errors      *BufferedChannel[Message]
 }
 
 func (h *Hub[T]) GetSubscribers() []*Subscriber[T] {
@@ -35,12 +41,14 @@ func (h *Hub[T]) GetTopics() []string {
 	return keys
 }
 
-func NewEventHub[T MessageBase](ctx context.Context) *Hub[T] {
+func NewEventHub[T MessageBase](parentCtx context.Context) *Hub[T] {
+	c, can := context.WithCancel(parentCtx)
 	return &Hub[T]{
-		Hub:    *CreateBufferedChannel[T](),
-		Ctx:    ctx,
+		Hub:    CreateBufferedChannel[T](parentCtx, DefaultHubWorkerCount, DefaultHubBufferSize),
+		ctx:    c,
+		cancel: can,
 		Topics: make(map[string][]*Subscriber[T]),
-		Errors: *CreateBufferedChannel[ErrorMessage]()}
+		Errors: CreateBufferedChannel[Message](parentCtx, DefaultErrorWorkerCount, DefaulErrorBufferSize)}
 }
 
 func (h *Hub[T]) Subscribe(s *Subscriber[T]) error {
@@ -61,7 +69,19 @@ func (h *Hub[T]) Unsubscribe(s Subscriber[T]) error {
 	defer h.mut.Unlock()
 	for i, subscriber := range h.Subscribers {
 		if subscriber.SubscriberId == s.SubscriberId {
+			// Is there a better way? Yes, but only if order doesn't matter:
+			// s[i] = s[len(s)-1] // move last item into the removed spot
+			// s = s[:len(s)-1]   // truncate slice
 			h.Subscribers = append(h.Subscribers[:i], h.Subscribers[i+1:]...)
+
+			for j, sub := range h.Topics[s.Topic] {
+				if sub.SubscriberId == s.SubscriberId {
+					if len(h.Topics[s.Topic]) < 1 {
+						//remove topic from map
+					}
+					h.Topics[s.Topic] = append(h.Topics[s.Topic][:j], h.Topics[s.Topic][j+1:]...)
+				}
+			}
 			return nil
 		}
 	}
@@ -75,19 +95,33 @@ func (h *Hub[T]) Publish(e T) error {
 	return nil
 }
 
-func (h *Hub[T]) Run(workers int, ctx context.Context) error {
-	_ = strconv.Itoa(workers)
-	slog.Info("Starting event hub")
+func (h *Hub[T]) Start(workers int, ctx context.Context) error {
+
+	for range workers {
+		go h.runWorker(ctx)
+	}
+
+	if len(h.Errors.Ch) == 0 {
+		return nil
+	}
+	return errors.New("error in starting workers")
+}
+
+func (h *Hub[T]) Stop() error {
+	h.cancel()
+	return nil
+}
+
+func (h *Hub[T]) runWorker(ctx context.Context) {
 	for {
 		select {
-		case <-h.Ctx.Done():
-			slog.Info("Message hub stopped.")
-			return context.Canceled
+		case <-ctx.Done():
+			return
 		default:
 			e := <-h.Hub.Ch
 			err := h.RouteMessage(e)
 			if err != nil {
-				return err
+				h.Errors.Add(*NewErrorMessage(err, "HubWorker"))
 			}
 		}
 	}
@@ -97,21 +131,21 @@ func (h *Hub[T]) hubWorker() error {
 	return nil
 }
 
-func (h *Hub[T]) RouteMessage(e T) error {
+func (h *Hub[T]) RouteMessage(msg T) error {
 	h.mut.Lock()
 	defer h.mut.Unlock()
 
-	if e.GetType() == Request {
-		err := h.RouteRequest(e)
+	if msg.GetType() == Request {
+		err := h.RouteRequest(msg)
 		if err != nil {
 			return fmt.Errorf("unable to route request: %w", err)
 		}
 	}
-	if _, ok := h.Topics[e.GetDestination()]; !ok {
-		return errors.New("Invalid destination for event: " + e.GetDestination())
+	if _, ok := h.Topics[msg.GetDestination()]; !ok {
+		return errors.New("Invalid destination for event: " + msg.GetDestination())
 	}
-	for _, s := range h.Topics[e.GetDestination()] {
-		s.Ch <- e
+	for _, s := range h.Topics[msg.GetDestination()] {
+		s.Channel.Add(msg)
 	}
 	return nil
 }
@@ -120,7 +154,7 @@ func (h *Hub[T]) RouteMessage(e T) error {
 func (h *Hub[T]) RouteRequest(e T) error {
 	for _, subscriber := range h.GetSubscribers() {
 		if subscriber.SubscriberId.String() == e.GetDestination() {
-			subscriber.Ch <- e
+			subscriber.Channel.Add(e)
 			return nil
 		}
 	}
