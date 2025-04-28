@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+//TODO: Test that all the hub functions work as intended.
 //func TestEventHub(t *testing.T) {
 //	ctx, cancel := context.WithCancel(context.Background())
 //	defer cancel()
@@ -83,7 +84,7 @@ func TestSubscribe(t *testing.T) {
 
 func TestBufferedChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	channel := CreateBufferedChannel[Message](ctx, 1, 10)
+	channel := CreateBufferedChannel[Message](1, 10)
 	err := channel.Start(ctx)
 	if err != nil {
 		t.Errorf("Start error: %s", err)
@@ -127,7 +128,7 @@ func TestBufferedChannel(t *testing.T) {
 
 func TestReadTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	channel := CreateBufferedChannel[Message](ctx, 1, 10)
+	channel := CreateBufferedChannel[Message](1, 10)
 	err := channel.Start(ctx)
 	if err != nil {
 		t.Errorf("Start error: %s", err)
@@ -142,7 +143,7 @@ func TestReadTimeout(t *testing.T) {
 func TestClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	hub := NewEventHub[Message](ctx)
-	client := NewClient[Message](hub, ctx)
+	client := NewClient[Message](hub)
 	defer client.Close()
 
 	if len(client.GetSubscriptions()) != 0 {

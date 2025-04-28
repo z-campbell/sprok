@@ -24,6 +24,7 @@ type BufferedChannel[T any] struct {
 	cond    *sync.Cond
 	running bool
 	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 func (b *BufferedChannel[T]) Start(ctx context.Context) error {
@@ -48,10 +49,13 @@ func (b *BufferedChannel[T]) Stop() error {
 	return nil
 }
 
-func CreateBufferedChannel[T any](ctx context.Context, workerCount int, bufferSize int) *BufferedChannel[T] {
+func CreateBufferedChannel[T any](workerCount int, bufferSize int) *BufferedChannel[T] {
+	ctx, cancel := context.WithCancel(context.Background())
 	b := &BufferedChannel[T]{
 		Ch:     make(chan T, bufferSize),
 		Buffer: &[]T{},
+		cancel: cancel,
+		ctx:    ctx,
 	}
 	b.cond = sync.NewCond(&b.mu)
 	b.launchWorkers(ctx, workerCount)
@@ -66,6 +70,9 @@ func (b *BufferedChannel[T]) launchWorkers(ctx context.Context, numWorkers int) 
 
 func (b *BufferedChannel[T]) Add(t T) {
 	select {
+	case <-b.ctx.Done():
+		b.cond.Broadcast()
+		return
 	case b.Ch <- t:
 		b.cond.Broadcast()
 	default:
@@ -97,7 +104,6 @@ func (b *BufferedChannel[T]) runWorker(ctx context.Context) {
 			}
 			b.cond.Wait()
 		}
-
 		val := (*b.Buffer)[0]
 		*b.Buffer = (*b.Buffer)[1:]
 		b.mu.Unlock()
@@ -108,4 +114,9 @@ func (b *BufferedChannel[T]) runWorker(ctx context.Context) {
 		case b.Ch <- val:
 		}
 	}
+}
+
+func (b *BufferedChannel[T]) Close() {
+	b.cancel()
+	close(b.Ch)
 }

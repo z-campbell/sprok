@@ -21,6 +21,7 @@ type Subscriber[T any] struct {
 	Topic        string
 	Channel      *BufferedChannel[T]
 	cancel       context.CancelFunc
+	ctx          context.Context
 }
 
 func (s *Subscriber[T]) GetId() uuid.UUID {
@@ -36,11 +37,14 @@ func NewSubscriber[T any](topic string, maxBuff int) Subscriber[T] {
 	return Subscriber[T]{
 		SubscriberId: uuid.New(),
 		Topic:        topic,
-		Channel:      CreateBufferedChannel[T](cancelCtx, defaultWorkerCount, maxBuff),
+		Channel:      CreateBufferedChannel[T](defaultWorkerCount, maxBuff),
 		cancel:       cancelFunc,
+		ctx:          cancelCtx,
 	}
 }
 
 func (s *Subscriber[T]) Close() {
+	s.cancel()
+	s.Channel.Close()
 
 }

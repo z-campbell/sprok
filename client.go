@@ -20,8 +20,9 @@ type SprokClient[T MessageBase] interface {
 	GetSubscriptions() []*Subscriber[T]
 }
 
-func NewClient[T MessageBase](hub *Hub[T], ctx context.Context) *Client[T] {
-	return &Client[T]{hub: hub, ctx: ctx, id: uuid.New()}
+func NewClient[T MessageBase](hub *Hub[T]) *Client[T] {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Client[T]{hub: hub, ctx: ctx, cancel: cancel, id: uuid.New()}
 }
 
 func (c *Client[T]) GetId() uuid.UUID {
@@ -31,6 +32,7 @@ func (c *Client[T]) GetId() uuid.UUID {
 func (c *Client[T]) GetSubscriptions() []*Subscriber[T] {
 	return c.subscriptions
 }
+
 func (c *Client[T]) Subscribe(topic string) error {
 	s := NewSubscriber[T](topic, 10)
 	err := c.hub.Subscribe(&s)
@@ -56,4 +58,5 @@ func (c *Client[T]) Close() {
 	for _, sub := range c.subscriptions {
 		sub.cancel()
 	}
+	c.hub.RemoveSubscribers(c.subscriptions)
 }

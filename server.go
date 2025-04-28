@@ -8,15 +8,17 @@ import (
 )
 
 const (
-	DefaultHubBufferSize    = 100_000
-	DefaulErrorBufferSize   = 1000
-	DefaultHubWorkerCount   = 10
-	DefaultErrorWorkerCount = 10
+	DefaultHubBufferSize    = 1_000
+	DefaulErrorBufferSize   = 100
+	DefaultHubWorkerCount   = 7
+	DefaultErrorWorkerCount = 3
 )
 
-type MessageHub[T MessageBase] interface {
+// TODO: We need some method to clean up closed clients.
+type Broker[T MessageBase] interface {
 	GetSubscribers() []*Subscriber[T]
 	GetTopics() []string
+	Close()
 }
 
 type Hub[T MessageBase] struct {
@@ -27,6 +29,16 @@ type Hub[T MessageBase] struct {
 	Subscribers []*Subscriber[T]
 	Topics      map[string][]*Subscriber[T] // "TopicName" : []Subscriber
 	Errors      *BufferedChannel[Message]
+	wg          sync.WaitGroup
+}
+
+func (h *Hub[T]) Close() {
+	h.cancel()
+	for _, subscriber := range h.Subscribers {
+		subscriber.cancel()
+	}
+	h.wg.Wait()
+	h.Hub.Close()
 }
 
 func (h *Hub[T]) GetSubscribers() []*Subscriber[T] {
@@ -42,13 +54,15 @@ func (h *Hub[T]) GetTopics() []string {
 }
 
 func NewEventHub[T MessageBase](parentCtx context.Context) *Hub[T] {
-	c, can := context.WithCancel(parentCtx)
-	return &Hub[T]{
-		Hub:    CreateBufferedChannel[T](parentCtx, DefaultHubWorkerCount, DefaultHubBufferSize),
+	c, can := context.WithCancel(context.Background())
+	h := &Hub[T]{
+		Hub:    CreateBufferedChannel[T](DefaultHubWorkerCount, DefaultHubBufferSize),
 		ctx:    c,
 		cancel: can,
 		Topics: make(map[string][]*Subscriber[T]),
-		Errors: CreateBufferedChannel[Message](parentCtx, DefaultErrorWorkerCount, DefaulErrorBufferSize)}
+		Errors: CreateBufferedChannel[Message](DefaultErrorWorkerCount, DefaulErrorBufferSize),
+	}
+	return h
 }
 
 func (h *Hub[T]) Subscribe(s *Subscriber[T]) error {
@@ -76,8 +90,8 @@ func (h *Hub[T]) Unsubscribe(s Subscriber[T]) error {
 
 			for j, sub := range h.Topics[s.Topic] {
 				if sub.SubscriberId == s.SubscriberId {
-					if len(h.Topics[s.Topic]) < 1 {
-						//remove topic from map
+					if len(h.Topics[s.Topic]) == 0 {
+						delete(h.Topics, s.Topic)
 					}
 					h.Topics[s.Topic] = append(h.Topics[s.Topic][:j], h.Topics[s.Topic][j+1:]...)
 				}
@@ -95,10 +109,11 @@ func (h *Hub[T]) Publish(e T) error {
 	return nil
 }
 
-func (h *Hub[T]) Start(workers int, ctx context.Context) error {
+func (h *Hub[T]) Start(workers int) error {
+	h.wg.Add(workers)
 
 	for range workers {
-		go h.runWorker(ctx)
+		go h.runWorker(h.ctx, &h.wg)
 	}
 
 	if len(h.Errors.Ch) == 0 {
@@ -107,18 +122,13 @@ func (h *Hub[T]) Start(workers int, ctx context.Context) error {
 	return errors.New("error in starting workers")
 }
 
-func (h *Hub[T]) Stop() error {
-	h.cancel()
-	return nil
-}
-
-func (h *Hub[T]) runWorker(ctx context.Context) {
+func (h *Hub[T]) runWorker(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ctx.Done():
+			wg.Done()
 			return
-		default:
-			e := <-h.Hub.Ch
+		case e := <-h.Hub.Ch:
 			err := h.RouteMessage(e)
 			if err != nil {
 				h.Errors.Add(*NewErrorMessage(err, "HubWorker"))
@@ -134,13 +144,23 @@ func (h *Hub[T]) hubWorker() error {
 func (h *Hub[T]) RouteMessage(msg T) error {
 	h.mut.Lock()
 	defer h.mut.Unlock()
-
 	if msg.GetType() == Request {
 		err := h.RouteRequest(msg)
 		if err != nil {
 			return fmt.Errorf("unable to route request: %w", err)
 		}
 	}
+
+	// if destination/subject == "*" route to all subs
+	if msg.GetDestination() == "*" {
+
+	}
+
+	// Send to all subscribers on "*" default topic.
+	for _, subscriber := range h.Topics["*"] {
+		subscriber.Channel.Add(msg)
+	}
+
 	if _, ok := h.Topics[msg.GetDestination()]; !ok {
 		return errors.New("Invalid destination for event: " + msg.GetDestination())
 	}
@@ -159,6 +179,22 @@ func (h *Hub[T]) RouteRequest(e T) error {
 		}
 	}
 	return fmt.Errorf("SubscriberId: %s not exists", e.GetDestination())
+}
+
+// TODO: Test this, and combine with unsubscribe.
+func (h *Hub[T]) RemoveSubscribers(subs []*Subscriber[T]) {
+	for _, sub := range subs {
+		if _, ok := h.Topics[sub.Topic]; ok {
+			for i, subscriber := range h.Topics[sub.Topic] {
+				if subscriber.SubscriberId == sub.SubscriberId {
+					h.Topics[sub.Topic] = append(h.Topics[sub.Topic][:i], h.Topics[sub.Topic][i+1:]...)
+				}
+				if len(h.Topics[sub.Topic]) == 0 {
+					delete(h.Topics, sub.Topic)
+				}
+			}
+		}
+	}
 }
 
 func (h *Hub[T]) RouteError(e T) error {
