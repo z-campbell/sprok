@@ -10,12 +10,14 @@ import (
 
 const (
 	numPublishers           = 100
-	numSubscribers          = 100
-	numMessagesPerPublisher = 1_000
-	numHubWorkers           = 20
-	maxSubBuffer            = 10
+	numSubscribers          = 10
+	numMessagesPerPublisher = 10000
+	numHubWorkers           = 5
+	maxSubBuffer            = 100
 )
 
+// TODO: Parameterize this test rather than defining consts.
+// TODO: Add in profiling and benchmarking.
 func StressTest() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -68,7 +70,7 @@ func publisher(wg *sync.WaitGroup, name string, h *Hub[Message], numMessage int,
 func consumer(wg *sync.WaitGroup, s *Subscriber[Message]) {
 
 	for k := range numMessagesPerPublisher * numPublishers {
-		v, err := s.Channel.TryReadChannel(5 * time.Millisecond)
+		v, err := s.Channel.TryReadChannel(250 * time.Millisecond)
 		if err != nil || v == nil {
 			fmt.Printf("%d - Error trying to read from subscriber= %v, Msg: %v - Err: %s\n", k, s, v, err)
 		}

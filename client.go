@@ -20,6 +20,10 @@ type SprokClient[T MessageBase] interface {
 	GetSubscriptions() []*Subscriber[T]
 }
 
+func (c *Client[T]) IsConnected() (string, bool) {
+	return "", false
+}
+
 func NewClient[T MessageBase](hub *Hub[T]) *Client[T] {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client[T]{hub: hub, ctx: ctx, cancel: cancel, id: uuid.New()}
