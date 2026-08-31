@@ -1,4 +1,4 @@
-module github.com/z-campbell/wisp
+module github.com/z-campbell/sprok
 
 go 1.24
 

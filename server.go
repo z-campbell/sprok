@@ -1,4 +1,4 @@
-package main
+package sprok
 
 import (
 	"context"
@@ -14,13 +14,15 @@ const (
 	DefaultErrorWorkerCount = 3
 )
 
-// TODO: We need some method to clean up closed clients.
+// Broker describes the read-only surface of a Hub: enumerating subscribers/topics and shutting down.
 type Broker[T MessageBase] interface {
 	GetSubscribers() []*Subscriber[T]
 	GetTopics() []string
 	Close()
 }
 
+// Hub routes messages of type T between subscribers, grouped by topic, using a background
+// worker pool. Create one with NewEventHub and register consumers with Subscribe.
 type Hub[T MessageBase] struct {
 	Hub         *BufferedChannel[T]
 	ctx         context.Context
@@ -32,19 +34,22 @@ type Hub[T MessageBase] struct {
 	wg          sync.WaitGroup
 }
 
+// Close shuts down the hub, cancels subscribers, waits for workers to exit, and closes the internal queue.
 func (h *Hub[T]) Close() {
 	h.cancel()
 	for _, subscriber := range h.Subscribers {
-		subscriber.cancel()
+		subscriber.Close()
 	}
 	h.wg.Wait()
 	h.Hub.Close()
 }
 
+// GetSubscribers returns the current subscriber list for the hub.
 func (h *Hub[T]) GetSubscribers() []*Subscriber[T] {
 	return h.Subscribers
 }
 
+// GetTopics returns the topic names currently known to the hub.
 func (h *Hub[T]) GetTopics() []string {
 	keys := make([]string, 0, len(h.Topics))
 	for k := range h.Topics {
@@ -53,8 +58,9 @@ func (h *Hub[T]) GetTopics() []string {
 	return keys
 }
 
+// NewEventHub creates a hub whose context derives from parentCtx and default internal channels.
 func NewEventHub[T MessageBase](parentCtx context.Context) *Hub[T] {
-	c, can := context.WithCancel(context.Background())
+	c, can := context.WithCancel(parentCtx)
 	h := &Hub[T]{
 		Hub:    CreateBufferedChannel[T](DefaultHubWorkerCount, DefaultHubBufferSize),
 		ctx:    c,
@@ -65,6 +71,7 @@ func NewEventHub[T MessageBase](parentCtx context.Context) *Hub[T] {
 	return h
 }
 
+// Subscribe registers a subscriber with the hub and adds it to the topic routing table.
 func (h *Hub[T]) Subscribe(s *Subscriber[T]) error {
 	h.mut.Lock()
 	defer h.mut.Unlock()
@@ -78,6 +85,7 @@ func (h *Hub[T]) Subscribe(s *Subscriber[T]) error {
 	return nil
 }
 
+// Unsubscribe removes a subscriber from the hub's subscriber list and topic index.
 func (h *Hub[T]) Unsubscribe(s Subscriber[T]) error {
 	h.mut.Lock()
 	defer h.mut.Unlock()
@@ -90,10 +98,11 @@ func (h *Hub[T]) Unsubscribe(s Subscriber[T]) error {
 
 			for j, sub := range h.Topics[s.Topic] {
 				if sub.SubscriberId == s.SubscriberId {
+					h.Topics[s.Topic] = append(h.Topics[s.Topic][:j], h.Topics[s.Topic][j+1:]...)
 					if len(h.Topics[s.Topic]) == 0 {
 						delete(h.Topics, s.Topic)
 					}
-					h.Topics[s.Topic] = append(h.Topics[s.Topic][:j], h.Topics[s.Topic][j+1:]...)
+					break
 				}
 			}
 			return nil
@@ -102,6 +111,7 @@ func (h *Hub[T]) Unsubscribe(s Subscriber[T]) error {
 	return fmt.Errorf("SubscriberId: %s not exists", s.SubscriberId)
 }
 
+// Publish queues a message for the hub workers to route to subscribers.
 func (h *Hub[T]) Publish(e T) error {
 	h.mut.Lock()
 	defer h.mut.Unlock()
@@ -109,6 +119,7 @@ func (h *Hub[T]) Publish(e T) error {
 	return nil
 }
 
+// Start launches the hub's routing workers so published messages can be processed.
 func (h *Hub[T]) Start(workers int) error {
 	h.wg.Add(workers)
 
@@ -116,12 +127,10 @@ func (h *Hub[T]) Start(workers int) error {
 		go h.runWorker(h.ctx, &h.wg)
 	}
 
-	if len(h.Errors.Ch) == 0 {
-		return nil
-	}
-	return errors.New("error in starting workers")
+	return nil
 }
 
+// runWorker consumes messages from the hub queue and routes them to subscribers.
 func (h *Hub[T]) runWorker(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		select {
@@ -137,10 +146,7 @@ func (h *Hub[T]) runWorker(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-func (h *Hub[T]) hubWorker() error {
-	return nil
-}
-
+// RouteMessage fans a message to wildcard subscribers and to subscribers matching the message destination.
 func (h *Hub[T]) RouteMessage(msg T) error {
 	h.mut.Lock()
 	defer h.mut.Unlock()
@@ -151,9 +157,12 @@ func (h *Hub[T]) RouteMessage(msg T) error {
 		}
 	}
 
-	// if destination/subject == "*" route to all subs
+	// if destination/subject == "*" route to all subscribers, regardless of topic
 	if msg.GetDestination() == "*" {
-
+		for _, subscriber := range h.GetSubscribers() {
+			subscriber.Channel.Add(msg)
+		}
+		return nil
 	}
 
 	// Send to all subscribers on "*" default topic.
@@ -171,6 +180,7 @@ func (h *Hub[T]) RouteMessage(msg T) error {
 }
 
 // Routes requests directly to subscribers
+// RouteRequest delivers a request message directly to the intended subscriber when it exists.
 func (h *Hub[T]) RouteRequest(e T) error {
 	for _, subscriber := range h.GetSubscribers() {
 		if subscriber.SubscriberId.String() == e.GetDestination() {
@@ -181,22 +191,10 @@ func (h *Hub[T]) RouteRequest(e T) error {
 	return fmt.Errorf("SubscriberId: %s not exists", e.GetDestination())
 }
 
-// TODO: Test this, and combine with unsubscribe.
+// RemoveSubscribers removes a set of subscribers from the hub's subscriber list and topic routing table.
+// It delegates to Unsubscribe for each subscriber so the two removal paths stay in sync.
 func (h *Hub[T]) RemoveSubscribers(subs []*Subscriber[T]) {
 	for _, sub := range subs {
-		if _, ok := h.Topics[sub.Topic]; ok {
-			for i, subscriber := range h.Topics[sub.Topic] {
-				if subscriber.SubscriberId == sub.SubscriberId {
-					h.Topics[sub.Topic] = append(h.Topics[sub.Topic][:i], h.Topics[sub.Topic][i+1:]...)
-				}
-				if len(h.Topics[sub.Topic]) == 0 {
-					delete(h.Topics, sub.Topic)
-				}
-			}
-		}
+		_ = h.Unsubscribe(*sub)
 	}
-}
-
-func (h *Hub[T]) RouteError(e T) error {
-	return nil
 }

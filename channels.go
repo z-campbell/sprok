@@ -1,4 +1,4 @@
-package main
+package sprok
 
 import (
 	"context"
@@ -13,10 +13,13 @@ const (
 	DefaultDelayInterval     = 1 * time.Millisecond
 )
 
+// SprokChannel describes a channel that supports reading with a timeout.
 type SprokChannel[T any] interface {
 	TryReadChannel(time.Duration) (T, error)
 }
 
+// BufferedChannel wraps a channel with an unbounded overflow buffer and a background
+// worker pool that drains the buffer into the channel as space becomes available.
 type BufferedChannel[T any] struct {
 	Ch      chan T
 	Buffer  *[]T
@@ -27,6 +30,7 @@ type BufferedChannel[T any] struct {
 	cancel  context.CancelFunc
 }
 
+// Start enables the buffered channel's background worker loop.
 func (b *BufferedChannel[T]) Start(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -38,6 +42,7 @@ func (b *BufferedChannel[T]) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop disables the buffered channel's background worker loop.
 func (b *BufferedChannel[T]) Stop() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -45,10 +50,12 @@ func (b *BufferedChannel[T]) Stop() error {
 		return errors.New("channel is already stopped")
 	}
 	b.running = false
-	b.ctx.Done()
+	b.cancel()
+	b.cond.Broadcast()
 	return nil
 }
 
+// CreateBufferedChannel allocates a buffered channel with a background worker pool and a backing buffer.
 func CreateBufferedChannel[T any](workerCount int, bufferSize int) *BufferedChannel[T] {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &BufferedChannel[T]{
@@ -62,12 +69,14 @@ func CreateBufferedChannel[T any](workerCount int, bufferSize int) *BufferedChan
 	return b
 }
 
+// launchWorkers starts the background goroutines that move values from the buffer into the channel.
 func (b *BufferedChannel[T]) launchWorkers(ctx context.Context, numWorkers int) {
 	for range numWorkers {
 		go b.runWorker(ctx)
 	}
 }
 
+// Add queues a value into the buffered channel, using the in-memory channel when possible and the buffer otherwise.
 func (b *BufferedChannel[T]) Add(t T) {
 	select {
 	case <-b.ctx.Done():
@@ -83,6 +92,7 @@ func (b *BufferedChannel[T]) Add(t T) {
 	}
 }
 
+// TryReadChannel attempts to read a value from the channel within the requested timeout.
 func (b *BufferedChannel[T]) TryReadChannel(timeout time.Duration) (*T, error) {
 	var val T
 	select {
@@ -93,6 +103,7 @@ func (b *BufferedChannel[T]) TryReadChannel(timeout time.Duration) (*T, error) {
 	}
 }
 
+// runWorker moves values from the backing buffer into the main channel while the channel remains active.
 func (b *BufferedChannel[T]) runWorker(ctx context.Context) {
 	for {
 		b.mu.Lock()
@@ -116,6 +127,7 @@ func (b *BufferedChannel[T]) runWorker(ctx context.Context) {
 	}
 }
 
+// Close cancels the channel workers and closes the internal channel.
 func (b *BufferedChannel[T]) Close() {
 	b.cancel()
 	close(b.Ch)

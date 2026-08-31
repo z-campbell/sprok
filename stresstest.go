@@ -1,4 +1,4 @@
-package main
+package sprok
 
 import (
 	"context"
@@ -18,6 +18,8 @@ const (
 
 // TODO: Parameterize this test rather than defining consts.
 // TODO: Add in profiling and benchmarking.
+// StressTest runs a synthetic load test against the hub by creating subscribers,
+// spawning publishers, and measuring how quickly messages are delivered.
 func StressTest() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -28,7 +30,7 @@ func StressTest() {
 		fmt.Printf("Error starting hub with numWorkers= %d - Err: %s", numHubWorkers, err)
 	}
 
-	for i := 0; i < numSubscribers; i++ {
+	for range numSubscribers {
 		sub := NewSubscriber[Message]("test", maxSubBuffer)
 		err = hub.Subscribe(&sub)
 		if err != nil {
@@ -55,11 +57,15 @@ func StressTest() {
 	fmt.Println("Message Throughput: (msg/sec): ", float32((numPublishers*numSubscribers*numMessagesPerPublisher*1000)/int(elapsed.Milliseconds())))
 }
 
+// publisher sends a fixed number of messages into the hub using the provided identity.
 func publisher(wg *sync.WaitGroup, name string, h *Hub[Message], numMessage int, topic string, payload string) {
-	msg := &Message{}
 	for i := range numMessage {
-		msg = NewMessage(Event, name, topic, payload+strconv.Itoa(i))
-		err := h.Publish(*msg)
+		msg, err := NewMessage(Event, name, topic, payload+strconv.Itoa(i))
+		if err != nil {
+			fmt.Printf("Error creating message from worker %s on message %d Err: %s", name, i, err)
+			continue
+		}
+		err = h.Publish(*msg)
 		if err != nil {
 			fmt.Printf("Error publishing from worker %s on message %d Err: %s", name, i, err)
 		}
@@ -67,6 +73,7 @@ func publisher(wg *sync.WaitGroup, name string, h *Hub[Message], numMessage int,
 	wg.Done()
 }
 
+// consumer drains a subscriber's channel until it has received the expected number of messages.
 func consumer(wg *sync.WaitGroup, s *Subscriber[Message]) {
 
 	for k := range numMessagesPerPublisher * numPublishers {
