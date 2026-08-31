@@ -1,8 +1,8 @@
 # sprok
 
-`sprok` is a small, generic, type-safe publish/subscribe message hub for Go. It
+`sprok` is a small, generic, type-safe pub/sub message hub for Go. It
 routes messages between topic-based subscribers using a background worker pool
-and a buffered channel primitive that gracefully absorbs bursts of traffic
+and a buffered channel primitive absorbs bursts of traffic
 without blocking publishers.
 
 ## Features
@@ -139,12 +139,6 @@ number for your machine:
 ```sh
 go run ./cmd/stresstest
 ```
-
-## Status
-
-This is a learning/portfolio project exploring generic, channel-based pub/sub
-design in Go. The core hub, routing, and client APIs are covered by tests, but
-the API may still change as the library evolves.
 
 ## License
 
