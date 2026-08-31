@@ -1,1 +1,8 @@
 /bin/
+/wisp
+/sprok
+.idea/
+.vscode/
+*.exe
+*.test
+*.out
